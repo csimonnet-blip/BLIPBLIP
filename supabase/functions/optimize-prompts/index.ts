@@ -106,24 +106,61 @@ Réponds UNIQUEMENT en JSON valide avec cette structure exacte:
 </instructions>`;
 }
 
-// ── Call AI to optimize (uses OpenAI-compatible API) ─────────
+// ── Call AI to optimize (priority: Gemini > Claude > OpenAI) ─
 async function callOptimizer(prompt: string): Promise<{
   optimized: string;
   score_before: number;
   score_after: number;
   notes: string;
 } | null> {
-  // Try Anthropic Claude first, fallback to OpenAI
+  const geminiKey = Deno.env.get("GEMINI_API_KEY");
   const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
   const openaiKey = Deno.env.get("OPENAI_API_KEY");
 
-  if (anthropicKey) {
+  if (geminiKey) {
+    return await callGemini(prompt, geminiKey);
+  } else if (anthropicKey) {
     return await callClaude(prompt, anthropicKey);
   } else if (openaiKey) {
     return await callOpenAI(prompt, openaiKey);
   }
 
   return null;
+}
+
+async function callGemini(
+  prompt: string,
+  apiKey: string
+): Promise<{
+  optimized: string;
+  score_before: number;
+  score_after: number;
+  notes: string;
+} | null> {
+  const resp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          maxOutputTokens: 2048,
+          responseMimeType: "application/json",
+        },
+      }),
+    }
+  );
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`Gemini API error ${resp.status}: ${err}`);
+  }
+
+  const data = await resp.json();
+  const text =
+    data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return parseOptimizationResult(text);
 }
 
 async function callClaude(
@@ -345,7 +382,7 @@ serve(async (req: Request) => {
               status: "failed",
               attempts: prompt.attempts + 1,
               optimization_notes:
-                "No AI API key configured (ANTHROPIC_API_KEY or OPENAI_API_KEY) or failed to parse response",
+                "No AI API key configured (GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY) or failed to parse response",
             })
             .eq("id", prompt.id);
 
