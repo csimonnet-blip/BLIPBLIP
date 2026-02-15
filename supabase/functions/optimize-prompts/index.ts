@@ -1,6 +1,6 @@
 // TaskFlow — Edge Function: optimize-prompts
 // Triggered by pg_cron (hourly) or manually via POST.
-// Fetches pending prompts, optimizes them via AI, updates the table.
+// Fetches pending prompts, optimizes them via Gemini, updates the table.
 //
 // POST /functions/v1/optimize-prompts
 // Body: { "triggered_by": "pg_cron" | "manual", "batch_size": 10 }
@@ -106,37 +106,18 @@ Réponds UNIQUEMENT en JSON valide avec cette structure exacte:
 </instructions>`;
 }
 
-// ── Call AI to optimize (priority: Gemini > Claude > OpenAI) ─
-async function callOptimizer(prompt: string): Promise<{
+// ── Call Gemini to optimize ─────────────────────────────────
+type OptimizationResult = {
   optimized: string;
   score_before: number;
   score_after: number;
   notes: string;
-} | null> {
-  const geminiKey = Deno.env.get("GEMINI_API_KEY");
-  const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
-  const openaiKey = Deno.env.get("OPENAI_API_KEY");
+};
 
-  if (geminiKey) {
-    return await callGemini(prompt, geminiKey);
-  } else if (anthropicKey) {
-    return await callClaude(prompt, anthropicKey);
-  } else if (openaiKey) {
-    return await callOpenAI(prompt, openaiKey);
-  }
+async function callGemini(prompt: string): Promise<OptimizationResult | null> {
+  const apiKey = Deno.env.get("GEMINI_API_KEY");
+  if (!apiKey) return null;
 
-  return null;
-}
-
-async function callGemini(
-  prompt: string,
-  apiKey: string
-): Promise<{
-  optimized: string;
-  score_before: number;
-  score_after: number;
-  notes: string;
-} | null> {
   const resp = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
     {
@@ -158,84 +139,9 @@ async function callGemini(
   }
 
   const data = await resp.json();
-  const text =
-    data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  return parseOptimizationResult(text);
-}
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-async function callClaude(
-  prompt: string,
-  apiKey: string
-): Promise<{
-  optimized: string;
-  score_before: number;
-  score_after: number;
-  notes: string;
-} | null> {
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-5-20250929",
-      max_tokens: 2048,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`Claude API error ${resp.status}: ${err}`);
-  }
-
-  const data = await resp.json();
-  const text = data.content?.[0]?.text || "";
-  return parseOptimizationResult(text);
-}
-
-async function callOpenAI(
-  prompt: string,
-  apiKey: string
-): Promise<{
-  optimized: string;
-  score_before: number;
-  score_after: number;
-  notes: string;
-} | null> {
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: prompt }],
-      max_tokens: 2048,
-      response_format: { type: "json_object" },
-    }),
-  });
-
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`OpenAI API error ${resp.status}: ${err}`);
-  }
-
-  const data = await resp.json();
-  const text = data.choices?.[0]?.message?.content || "";
-  return parseOptimizationResult(text);
-}
-
-function parseOptimizationResult(text: string): {
-  optimized: string;
-  score_before: number;
-  score_after: number;
-  notes: string;
-} | null {
-  // Extract JSON from potential markdown code blocks
+  // Parse JSON response
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) return null;
 
@@ -295,7 +201,7 @@ serve(async (req: Request) => {
       .select("*")
       .eq("status", "pending")
       .eq("is_active", true)
-      .lt("attempts", 3) // max 3 retries
+      .lt("attempts", 3)
       .order("created_at", { ascending: true })
       .limit(batchSize);
 
@@ -352,7 +258,7 @@ serve(async (req: Request) => {
           prompt.tags
         );
 
-        const result = await callOptimizer(metaPrompt);
+        const result = await callGemini(metaPrompt);
 
         if (result) {
           await supabase
@@ -375,14 +281,13 @@ serve(async (req: Request) => {
             score_after: result.score_after,
           });
         } else {
-          // No API key configured or parse failure
           await supabase
             .from("ai_prompts")
             .update({
               status: "failed",
               attempts: prompt.attempts + 1,
               optimization_notes:
-                "No AI API key configured (GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY) or failed to parse response",
+                "GEMINI_API_KEY not configured or failed to parse Gemini response",
             })
             .eq("id", prompt.id);
 
@@ -395,7 +300,6 @@ serve(async (req: Request) => {
       } catch (err) {
         const errorMessage = (err as Error).message;
 
-        // Revert to pending for retry (up to 3 attempts)
         const newStatus = prompt.attempts + 1 >= 3 ? "failed" : "pending";
         await supabase
           .from("ai_prompts")
