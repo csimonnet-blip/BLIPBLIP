@@ -273,6 +273,25 @@ serve(async (req: Request) => {
             })
             .eq("id", prompt.id);
 
+          // Send email notification to the prompt owner
+          if (prompt.user_id) {
+            try {
+              await fetch(
+                `${Deno.env.get("SUPABASE_URL")}/functions/v1/send-prompt-email`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  },
+                  body: JSON.stringify({ prompt_id: prompt.id }),
+                }
+              );
+            } catch {
+              // Email failure should not block the optimization flow
+            }
+          }
+
           results.push({
             id: prompt.id,
             label: prompt.label,
