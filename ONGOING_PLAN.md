@@ -52,6 +52,7 @@ Query errors via:
 - [ ] Deploy migration to Supabase
 - [ ] Deploy Edge Functions
 - [ ] Wire client-side error handler
+- [x] Set up Make.com scenario via API (Travel Email → Voyages)
 - [ ] Set up Make.com error webhook
 - [ ] Test end-to-end error flow
 
